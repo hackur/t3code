@@ -178,6 +178,17 @@ interface StagePackageJson {
   readonly devDependencies: {
     readonly electron: string;
   };
+  readonly repository?: {
+    readonly type: "git";
+    readonly url: string;
+  };
+}
+
+interface GitHubPublishConfig {
+  readonly provider: "github";
+  readonly owner: string;
+  readonly repo: string;
+  readonly releaseType: "release";
 }
 
 const AzureTrustedSigningOptionsConfig = Config.all({
@@ -417,14 +428,7 @@ function resolveDesktopRuntimeDependencies(
   return resolveCatalogDependencies(runtimeDependencies, catalog, "apps/desktop");
 }
 
-function resolveGitHubPublishConfig():
-  | {
-      readonly provider: "github";
-      readonly owner: string;
-      readonly repo: string;
-      readonly releaseType: "release";
-    }
-  | undefined {
+function resolveGitHubPublishConfig(): GitHubPublishConfig | undefined {
   const rawRepo =
     process.env.T3CODE_DESKTOP_UPDATE_REPOSITORY?.trim() ||
     process.env.GITHUB_REPOSITORY?.trim() ||
@@ -447,6 +451,7 @@ const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   target: string,
   productName: string,
   signed: boolean,
+  publishConfig: GitHubPublishConfig | undefined,
 ) {
   const buildConfig: Record<string, unknown> = {
     appId: "com.t3tools.t3code",
@@ -456,14 +461,13 @@ const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       buildResources: "apps/desktop/resources",
     },
   };
-  const publishConfig = resolveGitHubPublishConfig();
   if (publishConfig) {
     buildConfig.publish = [publishConfig];
   }
 
   if (platform === "mac") {
     buildConfig.mac = {
-      target: target === "dmg" ? [target, "zip"] : [target],
+      target: target === "dmg" && publishConfig ? [target, "zip"] : [target],
       icon: "icon.icns",
       category: "public.app-category.developer-tools",
     };
@@ -559,6 +563,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
         cause,
       }),
   });
+  const publishConfig = resolveGitHubPublishConfig();
 
   const appVersion = options.version ?? serverPackageJson.version;
   const commitHash = resolveGitCommitHash(repoRoot);
@@ -631,6 +636,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       options.target,
       desktopPackageJson.productName ?? "T3 Code",
       options.signed,
+      publishConfig,
     ),
     dependencies: {
       ...resolvedServerDependencies,
@@ -639,6 +645,14 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     devDependencies: {
       electron: electronVersion,
     },
+    ...(publishConfig
+      ? {
+          repository: {
+            type: "git" as const,
+            url: `https://github.com/${publishConfig.owner}/${publishConfig.repo}.git`,
+          },
+        }
+      : {}),
   };
 
   const stagePackageJsonString = yield* encodeJsonString(stagePackageJson);
@@ -669,6 +683,12 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     delete buildEnv.APPLE_API_KEY;
     delete buildEnv.APPLE_API_KEY_ID;
     delete buildEnv.APPLE_API_ISSUER;
+  }
+
+  if (!publishConfig) {
+    delete buildEnv.GH_TOKEN;
+    delete buildEnv.GITHUB_TOKEN;
+    delete buildEnv.GITHUB_RELEASE_TOKEN;
   }
 
   if (process.platform === "win32") {
